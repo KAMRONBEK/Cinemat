@@ -6,12 +6,14 @@ STACK=/opt/arr
 DEST=/mnt/storage/backups/arr
 KEEP=7
 STAMP="$(date +%Y%m%d-%H%M%S)"
-CONTAINERS=(qbittorrent radarr sonarr prowlarr)
+CONTAINERS=(qbittorrent radarr sonarr prowlarr jellyseerr)
 
 mkdir -p "$DEST"
 
 # Radarr/Sonarr/Prowlarr use SQLite with WAL; qBittorrent persists settings in
-# qBittorrent.conf. Stop the stack briefly so tar snapshots restore cleanly.
+# qBittorrent.conf; Jellyseerr keeps its user account, its generated Jellyfin API
+# key and the whole request history in db.sqlite3 -- losing it means redoing the
+# setup wizard. Stop the stack briefly so tar snapshots restore cleanly.
 WAS_RUNNING=()
 for c in "${CONTAINERS[@]}"; do
   if docker ps --format '{{.Names}}' | grep -qx "$c"; then
@@ -25,7 +27,7 @@ tar -C "$STACK" \
     --exclude='*/log' \
     --exclude='*/Backups' \
     -czf "$DEST/arr-config-$STAMP.tar.gz" \
-    radarr sonarr prowlarr qbittorrent
+    radarr sonarr prowlarr qbittorrent jellyseerr
 
 for c in "${WAS_RUNNING[@]}"; do
   docker start "$c" >/dev/null

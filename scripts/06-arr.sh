@@ -31,6 +31,7 @@ done
 install -d -o 1000 -g 1000 -m 755 \
   "$STACK" \
   "$STACK/radarr" "$STACK/sonarr" "$STACK/prowlarr" "$STACK/qbittorrent" \
+  "$STACK/jellyseerr" \
   /mnt/storage/media/movies /mnt/storage/media/tv \
   "$DOWNLOADS/complete" "$DOWNLOADS/incomplete" \
   "${CATEGORY_DIRS[@]}" \
@@ -84,6 +85,7 @@ wait_http "http://127.0.0.1:7878/ping" "Radarr"
 wait_http "http://127.0.0.1:8989/ping" "Sonarr"
 wait_http "http://127.0.0.1:9696/ping" "Prowlarr"
 wait_qbit
+wait_http "http://127.0.0.1:5055/api/v1/status" "Jellyseerr"
 
 api_key() {
   grep -oP '(?<=<ApiKey>)[^<]+' "$1" | head -1
@@ -282,11 +284,49 @@ configure_qbittorrent() {
   echo "qBittorrent configured"
 }
 
+configure_jellyseerr() {
+  local cfg="$STACK/jellyseerr/settings.json"
+
+  for _ in $(seq 1 60); do [[ -f "$cfg" ]] && break; sleep 2; done
+  [[ -f "$cfg" ]] || { echo "Jellyseerr settings.json never appeared" >&2; return 1; }
+
+  if jq -e '.radarr | length > 0' "$cfg" >/dev/null 2>&1; then
+    echo "Jellyseerr already seeded"; return 0
+  fi
+
+  # Seed Radarr/Sonarr only. Deliberately DO NOT set .jellyfin.ip here: Jellyseerr
+  # refuses first-time sign-in with 500 "Jellyfin hostname already configured" if a
+  # hostname is already present, and logs nothing, so the browser shows only a
+  # generic failure. The media-server step needs a Jellyfin password anyway, which
+  # does not belong in this repo. See README section 10.
+  docker stop jellyseerr >/dev/null
+  jq --arg rk "$RADARR_KEY" --arg sk "$SONARR_KEY" --arg ip "$LAN_IP" '
+     .radarr = [{
+       name: "Radarr", hostname: "radarr", port: 7878, apiKey: $rk, useSsl: false, baseUrl: "",
+       activeProfileId: 6, activeProfileName: "HD - 720p/1080p", activeDirectory: "/data/media/movies",
+       is4k: false, minimumAvailability: "released", isDefault: true,
+       externalUrl: ("http://" + $ip + ":7878"), syncEnabled: true, preventSearch: false,
+       tagRequests: false, tags: []
+     }]
+     | .sonarr = [{
+       name: "Sonarr", hostname: "sonarr", port: 8989, apiKey: $sk, useSsl: false, baseUrl: "",
+       activeProfileId: 6, activeProfileName: "HD - 720p/1080p", activeDirectory: "/data/media/tv",
+       activeAnimeProfileId: null, activeAnimeProfileName: null, activeAnimeDirectory: null,
+       activeLanguageProfileId: null, activeAnimeLanguageProfileId: null,
+       is4k: false, isDefault: true, enableSeasonFolders: true,
+       externalUrl: ("http://" + $ip + ":8989"), syncEnabled: true, preventSearch: false,
+       tagRequests: false, tags: [], animeTags: []
+     }]' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+  docker start jellyseerr >/dev/null
+  echo "Jellyseerr seeded with Radarr/Sonarr (sign-in stays manual)"
+}
+
 say "5/6  Bootstrap apps"
 configure_qbittorrent
 configure_radarr
 configure_sonarr
 configure_prowlarr
+configure_jellyseerr
 
 say "6/6  Backup timer"
 install -m 755 "$SRC_DIR/arr-backup.sh" /usr/local/bin/arr-backup.sh
@@ -326,11 +366,16 @@ cat <<EOF
   Radarr       http://${LAN_IP}:7878
   Sonarr       http://${LAN_IP}:8989
   Prowlarr     http://${LAN_IP}:9696
+  Jellyseerr   http://${LAN_IP}:5055
 
 Login: $ADMIN_USER / (see $CREDS)
 Root folders: /data/media/movies, /data/media/tv
 Downloads:    /data/downloads/{complete,incomplete}
 
-Next manual step: add indexers in Prowlarr (Settings -> Indexers). They sync to Radarr/Sonarr.
+Next manual steps:
+  1. Add indexers in Prowlarr (Settings -> Indexers). They sync to Radarr/Sonarr.
+  2. Finish the Jellyseerr wizard at http://${LAN_IP}:5055 -- sign in with the
+     Jellyfin account. Enter the host WITHOUT a scheme or port (the form has a
+     http:// prefix box and a separate Port field). Radarr/Sonarr are pre-filled.
 Backups: /mnt/storage/backups/arr/ (nightly 04:15, 7 retained)
 EOF

@@ -410,6 +410,27 @@ container, and both depend on the ufw rule in §9's *Jellyfin refresh* note.
 
 This is the one container port open to the tailnet (§7), so requests work from away.
 
+### Checking on a request
+
+Jellyseerr -> **Requests** is the everyday view. Two different states are shown per
+title and they mean different things:
+
+| Where | Value | Meaning |
+|---|---|---|
+| Request status | `1` pending / `2` approved / `3` declined | did Jellyseerr accept the ask |
+| Media status | `2` pending / `3` processing / `4` partial / `5` available | has the file actually landed |
+
+"Processing" only means Radarr owns it now. For *why* nothing is moving, the real
+answer is always further down the chain:
+
+```
+Radarr -> Activity -> Queue     what is downloading, and how much is left
+Radarr -> Movies -> the title   whether Radarr considers it released at all
+qBittorrent                     transfer speed and seeders
+```
+
+A request can sit at *processing* indefinitely and be perfectly healthy — see §10.11.
+
 ### Jellyfin refresh
 
 Radarr and Sonarr each hold a Connect notification (`MediaBrowser`, named "Jellyfin")
@@ -488,9 +509,84 @@ ls -lh /mnt/storage/backups/arr/
    Prowlarr surfaces that as a sync warning in its log, not in its UI, so a source can
    look enabled in Prowlarr and simply be missing from Radarr.
 
+10. **Pre-filling Jellyseerr's Jellyfin hostname breaks its own setup wizard.** Seeding
+    `jellyfin.ip` in `settings.json` to save a wizard step makes first-time sign-in fail
+    with `500` and `{"error":"Jellyfin hostname already configured"}` — it treats a
+    present hostname as "already set up". Nothing is written to the log, so the browser
+    shows only a generic *Something went wrong*, and the obvious suspects (password,
+    URL, reachability) are all innocent. Seed `radarr`/`sonarr` only; leave `.jellyfin`
+    empty for the wizard to fill. Its URL field also wants a **bare hostname** — the form
+    supplies `http://` and the port separately, so pasting a full URL silently builds
+    `http://http://host:8096`.
+
+11. **A film still in cinemas looks like a broken request.** It sits at *processing*
+    forever with an empty queue. That is correct behaviour twice over: Radarr's
+    `minimumAvailability: released` holds anything with no digital or physical release
+    date, and the quality profile rejects what does exist. A real search returned 18
+    results of which 16 were rejected — 15 `TELESYNC`, 1 `CAM` — i.e. camcorder rips.
+    Nothing is stuck; it will grab itself when a proper release appears. Lowering
+    `minimumAvailability` to `inCinemas` only buys you a filmed-off-a-screen copy.
+
 ---
 
-## 11. Operations
+## 11. Using it (for everyone else in the house)
+
+Two apps, two jobs. You **ask** in one and **watch** in the other.
+
+| App | What it holds | You go there to |
+|---|---|---|
+| **Jellyseerr** | every film and show that exists | ask for something |
+| **Jellyfin** | only what is already downloaded | watch it |
+
+Searching Jellyfin for something the house does not own returns nothing, and that is
+not a fault — it only ever searches the shelf, never the shop.
+
+### Two addresses, and they work everywhere
+
+```
+Watch    http://100.83.255.76:8096      Jellyfin
+Request  http://100.83.255.76:5055      Jellyseerr
+```
+
+These are the Tailscale addresses, so they work at home *and* away. The
+`192.168.0.146` equivalents work only at home; using the Tailscale pair everywhere
+means one set to remember and nothing to change when you leave the house.
+
+### At home
+
+On the house Wi-Fi, both just work. Search in Jellyseerr, press **Request**, wait,
+then open Jellyfin and play it. Nothing else is needed — the server fetches, renames
+and files it on its own.
+
+### Away, including a Google TV you travel with
+
+Everything here is deliberately invisible from the public internet, so a device away
+from home needs **Tailscale** to tunnel back. Set it up once, ideally while the device
+is still at home:
+
+1. Play Store -> install **Tailscale**
+2. Open it; it shows a code and a link. On a phone, open that link and approve the
+   device on the same account
+3. Turn the VPN switch **on** and leave it on
+4. Play Store -> install **Jellyfin**
+5. Jellyfin -> Add Server -> `http://100.83.255.76:8096`, then sign in
+
+After that the device works anywhere with Wi-Fi, unchanged. If it ever says it cannot
+reach the server, check the Tailscale switch first — that is nearly always the cause.
+
+Requesting with a TV remote is miserable; request on a phone and watch on the TV.
+
+### What to expect
+
+Nothing appears instantly. Radarr searches every source before choosing one, then the
+file has to transfer, so minutes to an hour is normal depending on size and seeders.
+Progress lives in Jellyseerr -> Requests (§9). The \*arr admin UIs and qBittorrent stay
+home-only; Jellyseerr is the one management page reachable from away, because asking
+for a film from a hotel is the entire point of it.
+
+---
+
+## 12. Operations
 
 ```bash
 # Status
@@ -528,7 +624,7 @@ ls -lh /mnt/storage/backups/jellyfin/ /mnt/storage/backups/arr/
 
 ---
 
-## 12. Why Jellyfin and not Plex
+## 13. Why Jellyfin and not Plex
 
 Since 2025-04-29 Plex requires the **server admin** to hold Plex Pass ($6.99/mo,
 $69.99/yr, $249.99 lifetime) for remote streaming of personal media, or each viewer
