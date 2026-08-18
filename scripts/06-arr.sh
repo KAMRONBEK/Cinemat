@@ -8,6 +8,13 @@ STACK=/opt/arr
 CREDS="$STACK/.credentials"
 LAN_IP="${LAN_IP:-$(hostname -I | awk '{print $1}')}"
 
+# qBittorrent categories, one completed-download subdirectory each. Radarr and
+# Sonarr health-check that the client's save path exists inside their own
+# container, so these must be created up front rather than lazily on first
+# download -- otherwise both apps report a path-mapping error on a fresh install.
+QBIT_CATEGORIES=(radarr tv-sonarr prowlarr)
+DOWNLOADS=/mnt/storage/downloads
+
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
 [[ $EUID -eq 0 ]] || { echo "run me with sudo"; exit 1; }
@@ -16,11 +23,17 @@ command -v jq >/dev/null || apt-get install -y jq
 command -v openssl >/dev/null || apt-get install -y openssl
 
 say "1/6  Directories"
+CATEGORY_DIRS=()
+for cat in "${QBIT_CATEGORIES[@]}"; do
+  CATEGORY_DIRS+=("$DOWNLOADS/complete/$cat")
+done
+
 install -d -o 1000 -g 1000 -m 755 \
   "$STACK" \
   "$STACK/radarr" "$STACK/sonarr" "$STACK/prowlarr" "$STACK/qbittorrent" \
   /mnt/storage/media/movies /mnt/storage/media/tv \
-  /mnt/storage/downloads/complete /mnt/storage/downloads/incomplete \
+  "$DOWNLOADS/complete" "$DOWNLOADS/incomplete" \
+  "${CATEGORY_DIRS[@]}" \
   /mnt/storage/backups/arr
 
 say "2/6  Install compose"
@@ -259,7 +272,7 @@ configure_qbittorrent() {
   curl -fsS -b "$cookie" -X POST "http://127.0.0.1:8080/api/v2/app/setPreferences" \
     --data-urlencode "json=$(echo "$prefs" | jq -c .)" >/dev/null
 
-  for cat in radarr tv-sonarr prowlarr; do
+  for cat in "${QBIT_CATEGORIES[@]}"; do
     curl -fsS -b "$cookie" -X POST "http://127.0.0.1:8080/api/v2/torrents/createCategory" \
       --data-urlencode "category=$cat" \
       --data-urlencode "savePath=/data/downloads/complete/$cat" >/dev/null 2>&1 || true

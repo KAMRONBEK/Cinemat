@@ -6,6 +6,12 @@
 #
 # Single /data mount lets Radarr/Sonarr hardlink completed downloads into the
 # library instead of copying across separate bind mounts.
+#
+# The subnet is pinned. Jellyfin is host-networked, so ufw genuinely filters it,
+# and Radarr/Sonarr reach it from this bridge to trigger a library refresh --
+# which needs a ufw rule naming this subnet (see scripts/03-firewall.sh). Left to
+# Docker's default pool the subnet can change when the network is recreated, and
+# that rule would silently stop matching.
 
 x-arr-common: &arr-common
   restart: unless-stopped
@@ -85,3 +91,10 @@ services:
       timeout: 5s
       retries: 5
       start_period: 90s
+
+networks:
+  default:
+    name: arr_default
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

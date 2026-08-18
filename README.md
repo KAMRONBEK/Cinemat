@@ -237,6 +237,7 @@ ufw was installed and enabled as a systemd unit but **`ufw status` reported
 1900/udp                ALLOW IN    192.168.0.0/24      # DLNA/SSDP
 5432,5433,6379,6380,9000,9001/tcp  ALLOW IN 192.168.0.0/24   # dev services
 8096/tcp on tailscale0  ALLOW IN    Anywhere            # Jellyfin over Tailscale
+8096/tcp                ALLOW IN    172.20.0.0/24       # Jellyfin API (arr library refresh)
 ```
 
 `DEFAULT_FORWARD_POLICY` was changed `DROP` → `ACCEPT` in `/etc/default/ufw`.
@@ -264,8 +265,13 @@ start via a drop-in at `/etc/systemd/system/docker.service.d/tailnet-guard.conf`
 (dockerd rebuilds `DOCKER-USER`, so a one-shot rule would silently vanish).
 Verified to survive `systemctl restart docker`.
 
-This is also why Radarr/Sonarr/Prowlarr are reachable from the LAN only — they ship
-with no authentication, so keeping them off the tailnet is deliberate.
+This is also why qBittorrent/Radarr/Sonarr/Prowlarr are reachable from the LAN only.
+All four ship with no authentication; `06-arr.sh` now enables forms auth on each
+(credentials in `/opt/arr/.credentials`), but keeping them off the tailnet as well is
+deliberate — the login is the second layer, not the only one.
+
+The one exception is outbound: Radarr and Sonarr reach Jellyfin on 8096 from the arr
+bridge subnet to refresh the library (§9). That is the `172.20.0.0/24` rule above.
 
 ### Not done
 
@@ -315,9 +321,10 @@ Install once from the repo:
 sudo bash scripts/06-arr.sh
 ```
 
-That creates `/opt/arr/`, starts the stack, enables forms auth on all four UIs,
-wires qBittorrent into Radarr/Sonarr/Prowlarr, links Prowlarr → Radarr/Sonarr for
-source sync, sets Jellyfin-compatible naming, and installs a nightly config backup.
+That creates `/opt/arr/` and the media/downloads tree (including one completed
+folder per qBittorrent category), starts the stack, enables forms auth on all four
+UIs, wires qBittorrent into Radarr/Sonarr/Prowlarr, links Prowlarr → Radarr/Sonarr
+for source sync, sets Jellyfin-compatible naming, and installs a nightly config backup.
 
 `/opt/arr/docker-compose.yml` — `lscr.io/linuxserver/{qbittorrent,radarr,sonarr,prowlarr}:latest`,
 PUID/PGID 1000, TZ Asia/Tashkent. All four share one bind mount: host
@@ -345,15 +352,39 @@ Radarr/Sonarr get read-write media access, unlike Jellyfin's read-only mount, be
 organising and renaming is their purpose. Hardlinks are enabled so completed files
 move into the library without doubling disk use.
 
-### Still manual
+### Sources
 
-**Sources** — add only in Prowlarr (Settings → Indexers) the feeds you use for
-owned/public-domain media. They sync to Radarr and Sonarr automatically. No source
-list is shipped with this repo.
+Prowlarr owns the source list; Radarr and Sonarr receive it automatically
+(`fullSync`). Eight public sources are enabled on this box and all eight pass
+Prowlarr's connection test. The list itself lives in Prowlarr, not in this repo —
+`06-arr.sh` ships no sources, so a fresh install starts empty and you add your own.
 
-**Jellyfin refresh** — optional Connect notification in Radarr/Sonarr (Settings →
-Connect → Jellyfin) using an API key from Jellyfin Dashboard → API Keys. Without it,
-rely on the hourly library scan from §10.
+How they distribute is worth knowing before wondering why the two apps disagree:
+
+- Prowlarr pushes a source into an app only if that app accepts it. Radarr refuses
+  any source whose movie-category search comes back empty, so its list is shorter
+  than Sonarr's — see §10.9, because the reason is only visible in Prowlarr's log.
+- A source exposing no usable categories reaches neither app, but stays searchable
+  from Prowlarr directly.
+- A movies-only source never reaches Sonarr, and a TV/anime-only source never
+  reaches Radarr. Both are normal, not a misconfiguration.
+
+Three more were attempted and not added: two sit behind CloudFlare and would need a
+FlareSolverr companion container, and one was unreachable from this network. Add more
+in Prowlarr → Settings → Indexers; they sync to Radarr/Sonarr on their own.
+
+### Jellyfin refresh
+
+Radarr and Sonarr each hold a Connect notification (`MediaBrowser`, named "Jellyfin")
+pointed at `host.docker.internal:8096` with `updateLibrary` on, firing on import,
+upgrade and rename. Files therefore appear in Jellyfin straight away instead of
+waiting for the scan in §10.1.
+
+That path needs a firewall rule. Jellyfin is host-networked, so ufw genuinely filters
+port 8096, and it only allowed the LAN — the call from Radarr arrives sourced from the
+arr bridge subnet instead. `scripts/03-firewall.sh` opens 8096 to `172.20.0.0/24`, and
+that subnet is pinned in `compose/arr.docker-compose.yml` so Docker cannot reassign it
+out from under the rule.
 
 qBittorrent has UPnP disabled so it does not punch the TP-Link. Port 6881 is not
 ufw-opened to the internet.
@@ -398,6 +429,28 @@ ls -lh /mnt/storage/backups/arr/
 6. **`pkexec`, not `sudo`.** Non-interactive shells have no TTY, so `sudo` cannot
    prompt. `pkexec <cmd>` raises a GNOME polkit dialog instead.
 
+7. **qBittorrent's category folders have to exist up front.** qBittorrent creates a
+   category's save path lazily, on first transfer — but Radarr and Sonarr health-check
+   it immediately, and both raised
+   *"places downloads in /data/downloads/complete/radarr but this directory does not
+   appear to exist inside the container"*. Creating the categories is not enough;
+   `06-arr.sh` now creates a directory per category from the same list.
+
+8. **ufw blocks container → Jellyfin, and it fails by hanging.** Jellyfin is
+   host-networked so ufw really does filter 8096, and it allowed only
+   `192.168.0.0/24`. Radarr's library-refresh call arrives from the bridge subnet
+   instead, so it was dropped — `curl` reported no response at all (`000`) rather than
+   a refusal, which reads like a dead service rather than a firewall. Allowing
+   `172.20.0.0/24` to 8096 fixes it; the subnet is pinned in compose so the rule
+   cannot drift.
+
+9. **Radarr declines some sources, and only says so in Prowlarr's log.** Prowlarr
+   pushes every source it holds, but Radarr rejects any whose movie-category search
+   returns nothing, answering `400` with
+   *"Query successful, but no results in the configured categories were returned"*.
+   Prowlarr surfaces that as a sync warning in its log, not in its UI, so a source can
+   look enabled in Prowlarr and simply be missing from Radarr.
+
 ---
 
 ## 11. Operations
@@ -407,6 +460,13 @@ ls -lh /mnt/storage/backups/arr/
 docker ps
 docker logs --tail 50 jellyfin
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.0.146:8096/health
+
+# *arr health -- empty [] means clean. API keys live in /opt/arr/<app>/config.xml
+for a in radarr:7878:v3 sonarr:8989:v3 prowlarr:9696:v1; do
+  IFS=: read -r n p v <<<"$a"
+  k=$(grep -oP '(?<=<ApiKey>)[^<]+' "/opt/arr/$n/config.xml" | head -1)
+  echo "$n: $(curl -fsS -H "X-Api-Key: $k" "http://127.0.0.1:$p/api/$v/health")"
+done
 
 # Restart / update
 cd /opt/jellyfin && docker compose restart
@@ -423,9 +483,10 @@ sudo ufw status verbose
 sudo iptables -L DOCKER-USER -n -v
 
 # Backups
-systemctl list-timers jellyfin-backup.timer
+systemctl list-timers jellyfin-backup.timer arr-backup.timer
 sudo /usr/local/bin/jellyfin-backup.sh
-ls -lh /mnt/storage/backups/jellyfin/
+sudo /usr/local/bin/arr-backup.sh
+ls -lh /mnt/storage/backups/jellyfin/ /mnt/storage/backups/arr/
 ```
 
 ---

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 LAN=192.168.0.0/24
+# Pinned in compose/arr.docker-compose.yml so this rule keeps matching if the
+# arr network is ever recreated.
+ARR_NET=172.20.0.0/24
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
 say "1/4  Don't break Docker: forward policy DROP -> ACCEPT"
@@ -16,11 +19,19 @@ ufw default allow outgoing
 
 say "3/4  Rules"
 # Remote family access arrives over the Tailscale interface. Without this rule
-# the whole remote-streaming plan dies the moment the firewall comes up.
-ufw allow in on tailscale0 comment 'Tailscale (remote family access)'
+# the whole remote-streaming plan dies the moment the firewall comes up. Scoped to
+# 8096: a blanket 'allow in on tailscale0' would also hand every family device on the
+# tailnet the postgres/redis/minio ports on this box (see README section 7).
+ufw allow in on tailscale0 to any port 8096 proto tcp comment 'Jellyfin over Tailscale'
 
 # Jellyfin is host-networked, so ufw genuinely enforces this one.
 ufw allow from "$LAN" to any port 8096 proto tcp comment 'Jellyfin web (LAN)'
+
+# Radarr/Sonarr sit on the arr bridge network and call Jellyfin's HTTP API to
+# refresh the library the moment an import lands. Jellyfin is host-networked, so
+# that request reaches ufw's INPUT chain sourced from the bridge subnet, not from
+# $LAN -- without this rule it is dropped and the refresh silently never happens.
+ufw allow from "$ARR_NET" to any port 8096 proto tcp comment 'Jellyfin API (arr library refresh)'
 
 # Client auto-discovery so the phone/TV apps find the server without typing an IP.
 ufw allow from "$LAN" to any port 7359 proto udp comment 'Jellyfin auto-discovery'
