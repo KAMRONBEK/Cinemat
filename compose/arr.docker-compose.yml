@@ -92,6 +92,33 @@ services:
       retries: 5
       start_period: 90s
 
+  # Search/request front end. This is the piece that answers "find me a film" --
+  # Jellyfin only ever searches files already on disk, so a request layer in front
+  # of Radarr/Sonarr is what makes searching a catalogue possible at all.
+  # Reaches Radarr/Sonarr by container name, and Jellyfin over host.docker.internal
+  # (allowed by the 172.20.0.0/24 ufw rule in scripts/03-firewall.sh).
+  jellyseerr:
+    <<: *arr-common
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    environment:
+      <<: *arr-env
+      LOG_LEVEL: info
+      PORT: "5055"
+    volumes:
+      - ./jellyseerr:/app/config
+    ports:
+      - "5055:5055"
+    depends_on:
+      - radarr
+      - sonarr
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5055/api/v1/status >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
 networks:
   default:
     name: arr_default

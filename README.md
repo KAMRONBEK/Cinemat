@@ -35,6 +35,7 @@ is the single largest available performance win. Deliberately deferred.
   Google TV  ────┤                                                    │
   Phones     ────┤   Ubuntu box (192.168.0.146)                       │
   Home PC    ────┤     ├─ jellyfin      :8096  (host network)         │
+                 │     ├─ jellyseerr    :5055  (bridge, LAN + tailnet) │
                  │     ├─ qbittorrent   :8080  (bridge, LAN only)     │
                  │     ├─ radarr        :7878  (bridge, LAN only)     │
                  │     ├─ sonarr        :8989  (bridge, LAN only)     │
@@ -254,11 +255,23 @@ Docker DNATs published ports through its own FORWARD chains, so **ufw INPUT rule
 not protect bridge-networked containers**. Jellyfin is host-networked and therefore
 genuinely governed by ufw; the dev stacks are not.
 
-`DOCKER-USER` closes the tailnet path:
+`DOCKER-USER` closes the tailnet path, with one deliberate hole for Jellyseerr:
 
 ```bash
-iptables -I DOCKER-USER 1 -i tailscale0 -j DROP
+iptables -I DOCKER-USER 1 -i tailscale0 -j DROP                              # everything
+iptables -I DOCKER-USER 1 -i tailscale0 -p tcp --dport 5055 -j ACCEPT        # except :5055
 ```
+
+Order is the entire security property, and `iptables -C` can only tell you a rule
+exists, not where it sits. So the guard script deletes both of its own rules and
+re-inserts them every run rather than appending conditionally — otherwise a second
+run could leave the blanket `DROP` above the `ACCEPT` and quietly close the hole.
+
+Jellyseerr is the exception because requesting a film while away is the point of it:
+without this you can watch from anywhere but only request from the sofa. It carries
+its own Jellyfin login, and the tailnet is already limited to devices signed into the
+account. The \*arr admin UIs stay blocked — they are the ones with broad filesystem
+and download control.
 
 Installed as `/usr/local/bin/docker-tailnet-guard.sh`, re-applied on every dockerd
 start via a drop-in at `/etc/systemd/system/docker.service.d/tailnet-guard.conf`
@@ -336,6 +349,7 @@ PUID/PGID 1000, TZ Asia/Tashkent. All four share one bind mount: host
 | Radarr | 7878 | root `/data/media/movies`, category `radarr` |
 | Sonarr | 8989 | root `/data/media/tv`, category `tv-sonarr` |
 | Prowlarr | 9696 | shared source manager; syncs to Radarr/Sonarr |
+| Jellyseerr | 5055 | request front end; talks to Radarr/Sonarr by container name |
 
 LAN URLs (home only — blocked over Tailscale by `DOCKER-USER`):
 
@@ -344,6 +358,7 @@ http://192.168.0.146:8080   qBittorrent
 http://192.168.0.146:7878   Radarr
 http://192.168.0.146:8989   Sonarr
 http://192.168.0.146:9696   Prowlarr
+http://192.168.0.146:5055   Jellyseerr  (also reachable over Tailscale)
 ```
 
 Login user/password: `/opt/arr/.credentials` (`ADMIN_USER` / `ADMIN_PASS`).
@@ -372,6 +387,28 @@ How they distribute is worth knowing before wondering why the two apps disagree:
 Three more were attempted and not added: two sit behind CloudFlare and would need a
 FlareSolverr companion container, and one was unreachable from this network. Add more
 in Prowlarr → Settings → Indexers; they sync to Radarr/Sonarr on their own.
+
+### Requesting (Jellyseerr)
+
+Jellyfin searches **files already on disk** — it is a player, not a catalogue. A search
+for a film you do not own returns "No results found", which is correct behaviour and
+regularly mistaken for a broken index. Jellyseerr is the missing half: it searches the
+full TMDb catalogue, and a request there tells Radarr/Sonarr to go and fetch the title.
+
+The whole loop, once a request is made:
+
+```
+Jellyseerr  ->  Radarr/Sonarr  ->  qBittorrent  ->  hardlink into library
+                                                 -> Jellyfin refresh (Connect)
+```
+
+Setup is one sign-in at `http://192.168.0.146:5055` using the Jellyfin account; the
+Radarr and Sonarr servers are pre-seeded into `jellyseerr/settings.json` by this repo's
+install, so the wizard only needs the media-server step. Jellyfin can be given as either
+`http://host.docker.internal:8096` or `http://192.168.0.146:8096` — both resolve from the
+container, and both depend on the ufw rule in §9's *Jellyfin refresh* note.
+
+This is the one container port open to the tailnet (§7), so requests work from away.
 
 ### Jellyfin refresh
 
