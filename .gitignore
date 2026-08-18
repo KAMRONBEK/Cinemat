@@ -1,0 +1,7 @@
+# Never commit live service state
+config/
+cache/
+*.db
+*.db-wal
+*.db-shm
+*.tar.gz

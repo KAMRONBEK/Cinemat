@@ -1,0 +1,52 @@
+# /opt/arr/docker-compose.yml
+# Library management for the Cinemat Jellyfin server.
+#
+# These are bridge-networked, so Docker DNATs past ufw. Access is confined to
+# the LAN by the DOCKER-USER rule installed earlier, which drops tailscale0 ->
+# container traffic. That means these admin UIs are reachable from home only,
+# NOT from the office over Tailscale -- deliberate: they have no auth by default.
+
+services:
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Tashkent
+    volumes:
+      - ./radarr:/config
+      # rw, unlike Jellyfin's mount: organising and renaming is the whole point.
+      - /mnt/storage/media/movies:/movies
+      - /mnt/storage/downloads:/downloads
+    ports:
+      - "7878:7878"
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Tashkent
+    volumes:
+      - ./sonarr:/config
+      - /mnt/storage/media/tv:/tv
+      - /mnt/storage/downloads:/downloads
+    ports:
+      - "8989:8989"
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Tashkent
+    volumes:
+      - ./prowlarr:/config
+    ports:
+      - "9696:9696"

@@ -1,0 +1,51 @@
+# /opt/jellyfin/docker-compose.yml
+# Personal/family media server. Host: Ubuntu 26.04, i5-12400F + RTX 4060.
+
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.11.11   # pinned; 12.0 is still RC as of 2026-08
+    container_name: jellyfin
+    restart: unless-stopped
+
+    # Host networking: required for DLNA and for the Android TV / phone apps to
+    # auto-discover the server on the LAN. It also means ufw actually filters
+    # this port -- bridge-mode containers punch through ufw via DOCKER-USER.
+    network_mode: host
+
+    # Run as softwhere(1000), who owns /mnt/storage. Keeps file ownership sane.
+    user: "1000:1000"
+
+    # ---- NVENC hardware transcoding on the RTX 4060 ----
+    # The i5-12400F is an "F" part: no iGPU, so there is no Quick Sync / VAAPI
+    # path on this box. The 4060 (Ada) is the better encoder anyway.
+    # Requires nvidia-container-toolkit -- installed by 01-gpu-and-stack.sh.
+    runtime: nvidia
+
+    environment:
+      - TZ=Asia/Tashkent
+      # uid 1000 has no writable home, so ASP.NET DataProtection silently fell
+      # back to an in-memory key repository and regenerated its keys on every
+      # restart. Point HOME at the persisted config volume so the keys survive
+      # (and get picked up by the nightly backup).
+      - HOME=/config
+      - NVIDIA_VISIBLE_DEVICES=all
+      # "video" is the one that matters. The toolkit default is utility,compute
+      # which silently hides NVENC/NVDEC and is the #1 cause of
+      # "I enabled hardware transcoding but the CPU still pegs at 100%".
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # Set this once Tailscale is up so cast/share links point somewhere useful:
+      # - JELLYFIN_PublishedServerUrl=http://<tailscale-name>:8096
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8096/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+    volumes:
+      - ./config:/config    # database, metadata, users. Back this up.
+      - ./cache:/cache      # transcode scratch + image cache. Disposable.
+      - /mnt/storage/media:/media:ro
+      # ^ read-only on purpose: nothing Jellyfin does can delete your library.
+      #   Drop the ":ro" if you want delete-from-UI or NFO writes into the folders.
