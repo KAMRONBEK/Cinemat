@@ -35,6 +35,7 @@ is the single largest available performance win. Deliberately deferred.
   Google TV  ────┤                                                    │
   Phones     ────┤   Ubuntu box (192.168.0.146)                       │
   Home PC    ────┤     ├─ jellyfin      :8096  (host network)         │
+                 │     ├─ qbittorrent   :8080  (bridge, LAN only)     │
                  │     ├─ radarr        :7878  (bridge, LAN only)     │
                  │     ├─ sonarr        :8989  (bridge, LAN only)     │
                  │     ├─ prowlarr      :9696  (bridge, LAN only)     │
@@ -58,13 +59,15 @@ Remote access is Tailscale only. **No router port forwarding, no UPnP, no DDNS.*
 
 /opt/arr/
   docker-compose.yml
-  radarr/  sonarr/  prowlarr/
+  .credentials             # admin login for all four UIs (mode 600, not in git)
+  radarr/  sonarr/  prowlarr/  qbittorrent/
 
 /mnt/storage/
   media/movies/            # mounted into Jellyfin READ-ONLY as /media/movies
   media/tv/                #                                     /media/tv
   downloads/{complete,incomplete}
   backups/jellyfin/        # nightly tarballs, 7 retained
+  backups/arr/             # nightly *arr config tarballs, 7 retained
 ```
 
 Config lives on the NVMe (SQLite wants the fast disk); media lives on the SATA SSD.
@@ -297,34 +300,75 @@ docker compose up -d
 
 ---
 
-## 9. Library management (Radarr / Sonarr / Prowlarr)
+## 9. Library management (Radarr / Sonarr / Prowlarr / qBittorrent)
 
-`/opt/arr/docker-compose.yml` — `lscr.io/linuxserver/{radarr,sonarr,prowlarr}:latest`,
-PUID/PGID 1000, TZ Asia/Tashkent.
+This stack organises the family's **own** media into Jellyfin: DVD/Blu-ray rips,
+public-domain and Creative Commons titles, Internet Archive collections, and local
+UZ film/TV where the household holds the rights. Radarr and Sonarr rename and
+file movies/shows to match §3; Prowlarr is the shared source manager; qBittorrent
+is the transfer client for those sources. Nothing is exposed publicly; UIs stay
+on the LAN.
 
-| Service | Port | Media mount |
+Install once from the repo:
+
+```bash
+sudo bash scripts/06-arr.sh
+```
+
+That creates `/opt/arr/`, starts the stack, enables forms auth on all four UIs,
+wires qBittorrent into Radarr/Sonarr/Prowlarr, links Prowlarr → Radarr/Sonarr for
+source sync, sets Jellyfin-compatible naming, and installs a nightly config backup.
+
+`/opt/arr/docker-compose.yml` — `lscr.io/linuxserver/{qbittorrent,radarr,sonarr,prowlarr}:latest`,
+PUID/PGID 1000, TZ Asia/Tashkent. All four share one bind mount: host
+`/mnt/storage` → container `/data` (enables hardlinks from incoming files into the library).
+
+| Service | Port | Paths (container) |
 |---|---|---|
-| Radarr | 7878 | `/mnt/storage/media/movies:/movies` (rw) |
-| Sonarr | 8989 | `/mnt/storage/media/tv:/tv` (rw) |
-| Prowlarr | 9696 | — |
+| qBittorrent | 8080 | complete `/data/downloads/complete`, incomplete `/data/downloads/incomplete` |
+| Radarr | 7878 | root `/data/media/movies`, category `radarr` |
+| Sonarr | 8989 | root `/data/media/tv`, category `tv-sonarr` |
+| Prowlarr | 9696 | shared source manager; syncs to Radarr/Sonarr |
 
-All three respond HTTP 200. **Currently unconfigured** — no root folders, no
-indexers, no download client.
+LAN URLs (home only — blocked over Tailscale by `DOCKER-USER`):
 
-These get read-write media mounts, unlike Jellyfin's read-only one, because
-organising and renaming is their purpose.
+```
+http://192.168.0.146:8080   qBittorrent
+http://192.168.0.146:7878   Radarr
+http://192.168.0.146:8989   Sonarr
+http://192.168.0.146:9696   Prowlarr
+```
 
-### Deliberately not configured
+Login user/password: `/opt/arr/.credentials` (`ADMIN_USER` / `ADMIN_PASS`).
 
-Indexers and a download client are not set up. Radarr/Sonarr are legitimate library
-tools and are installed as such, but their automation only does anything once pointed
-at indexers — and in the usual configuration those carry commercial films and TV.
-Automating retrieval of unlicensed content is infringement; "personal use" covers
-format-shifting media you already own, not acquiring works you never licensed.
+Radarr/Sonarr get read-write media access, unlike Jellyfin's read-only mount, because
+organising and renaming is their purpose. Hardlinks are enabled so completed files
+move into the library without doubling disk use.
 
-Where the same stack is fully legitimate: Internet Archive and public-domain
-collections, Creative Commons releases, your own DVD/Blu-ray rips, and local UZ
-film/TV where rights are held.
+### Still manual
+
+**Sources** — add only in Prowlarr (Settings → Indexers) the feeds you use for
+owned/public-domain media. They sync to Radarr and Sonarr automatically. No source
+list is shipped with this repo.
+
+**Jellyfin refresh** — optional Connect notification in Radarr/Sonarr (Settings →
+Connect → Jellyfin) using an API key from Jellyfin Dashboard → API Keys. Without it,
+rely on the hourly library scan from §10.
+
+qBittorrent has UPnP disabled so it does not punch the TP-Link. Port 6881 is not
+ufw-opened to the internet.
+
+### Backups
+
+`/usr/local/bin/arr-backup.sh`, driven by `arr-backup.timer` at 04:15 daily, 7 archives
+retained in `/mnt/storage/backups/arr/`. Stops all four containers before tarring config
+(SQLite + WAL, same rationale as Jellyfin §8).
+
+```bash
+systemctl list-timers arr-backup.timer
+sudo /usr/local/bin/arr-backup.sh
+ls -lh /mnt/storage/backups/arr/
+```
 
 ---
 
@@ -367,6 +411,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://192.168.0.146:8096/health
 # Restart / update
 cd /opt/jellyfin && docker compose restart
 cd /opt/jellyfin && docker compose pull && docker compose up -d   # bump the pin first
+cd /opt/arr && docker compose restart
+cd /opt/arr && docker compose pull && docker compose up -d
 
 # Tailscale
 tailscale status

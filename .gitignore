@@ -1,6 +1,7 @@
 # Never commit live service state
 config/
 cache/
+.credentials
 *.db
 *.db-wal
 *.db-shm

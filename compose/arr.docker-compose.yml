@@ -1,52 +1,87 @@
 # /opt/arr/docker-compose.yml
 # Library management for the Cinemat Jellyfin server.
 #
-# These are bridge-networked, so Docker DNATs past ufw. Access is confined to
-# the LAN by the DOCKER-USER rule installed earlier, which drops tailscale0 ->
-# container traffic. That means these admin UIs are reachable from home only,
-# NOT from the office over Tailscale -- deliberate: they have no auth by default.
+# Bridge-networked: Docker DNATs past ufw. DOCKER-USER drops tailscale0 ->
+# container traffic, so these admin UIs are LAN-only (not over Tailscale).
+#
+# Single /data mount lets Radarr/Sonarr hardlink completed downloads into the
+# library instead of copying across separate bind mounts.
+
+x-arr-common: &arr-common
+  restart: unless-stopped
+  environment: &arr-env
+    PUID: "1000"
+    PGID: "1000"
+    TZ: Asia/Tashkent
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
 
 services:
+  qbittorrent:
+    <<: *arr-common
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      <<: *arr-env
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: "6881"
+    volumes:
+      - ./qbittorrent:/config
+      - /mnt/storage:/data
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080 | grep -qE '^(200|401)$'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
   radarr:
+    <<: *arr-common
     image: lscr.io/linuxserver/radarr:latest
     container_name: radarr
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Asia/Tashkent
     volumes:
       - ./radarr:/config
-      # rw, unlike Jellyfin's mount: organising and renaming is the whole point.
-      - /mnt/storage/media/movies:/movies
-      - /mnt/storage/downloads:/downloads
+      - /mnt/storage:/data
     ports:
       - "7878:7878"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7878/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
   sonarr:
+    <<: *arr-common
     image: lscr.io/linuxserver/sonarr:latest
     container_name: sonarr
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Asia/Tashkent
     volumes:
       - ./sonarr:/config
-      - /mnt/storage/media/tv:/tv
-      - /mnt/storage/downloads:/downloads
+      - /mnt/storage:/data
     ports:
       - "8989:8989"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8989/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
   prowlarr:
+    <<: *arr-common
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr
-    restart: unless-stopped
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Asia/Tashkent
     volumes:
       - ./prowlarr:/config
     ports:
       - "9696:9696"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9696/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
